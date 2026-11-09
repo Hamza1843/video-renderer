@@ -131,5 +131,12 @@ def build_pptx(spec: dict, scene_artifacts: list, output_path: str):
                 poster_frame_image=None, mime_type="audio/wav"
             )
 
+        # narration text as speaker notes (narration_per_bullet is what
+        # render.py speaks when present); no notes slide if there is none
+        narration = scene.get("narration_per_bullet") or [scene.get("narration", "")]
+        notes = "\n".join(narration).strip()
+        if notes:
+            slide.notes_slide.notes_text_frame.text = notes
+
     prs.save(output_path)
     return output_path
