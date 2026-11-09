@@ -9,7 +9,8 @@ from pathlib import Path
 
 from pptx import Presentation
 from pptx.dml.color import RGBColor
-from pptx.enum.text import PP_ALIGN
+from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
+from pptx.oxml.ns import qn
 from pptx.util import Emu, Inches, Pt
 
 SLIDE_W = Inches(13.333)
@@ -109,12 +110,28 @@ def build_pptx(spec: dict, scene_artifacts: list, output_path: str):
                     width=SLIDE_W - Inches(1.6),
                     height=SLIDE_H - Inches(1.6))
         elif stype == "image" and art.get("image_png"):
-            slide.shapes.add_picture(art["image_png"], 0, 0,
-                                     width=SLIDE_W, height=SLIDE_H)
+            # cover the slide and centre-crop, keeping the aspect ratio
+            # (same framing as build_image in the video)
+            pic = slide.shapes.add_picture(art["image_png"], 0, 0,
+                                           width=SLIDE_W, height=SLIDE_H)
+            img_ratio = pic.image.size[0] / pic.image.size[1]
+            slide_ratio = SLIDE_W / SLIDE_H
+            if img_ratio > slide_ratio:
+                pic.crop_left = pic.crop_right = (1 - slide_ratio / img_ratio) / 2
+            elif img_ratio < slide_ratio:
+                pic.crop_top = pic.crop_bottom = (1 - img_ratio / slide_ratio) / 2
             if scene.get("caption"):
+                # 60% black bar across the bottom 12%, as in build_image
+                bar_h = int(SLIDE_H * 0.12)
+                bar = slide.shapes.add_shape(1, 0, SLIDE_H - bar_h, SLIDE_W, bar_h)
+                bar.fill.solid()
+                bar.fill.fore_color.rgb = RGBColor(0, 0, 0)
+                clr = bar._element.spPr.find(qn("a:solidFill"))[0]
+                clr.append(clr.makeelement(qn("a:alpha"), {"val": "60000"}))
+                bar.line.fill.background()
                 cb = slide.shapes.add_textbox(
-                    Inches(1), SLIDE_H - Inches(1.1),
-                    SLIDE_W - Inches(2), Inches(0.7))
+                    Inches(1), SLIDE_H - bar_h, SLIDE_W - Inches(2), bar_h)
+                cb.text_frame.vertical_anchor = MSO_ANCHOR.MIDDLE
                 cp = cb.text_frame.paragraphs[0]
                 cp.alignment = PP_ALIGN.CENTER
                 cr = cp.add_run()

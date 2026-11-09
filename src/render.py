@@ -451,6 +451,9 @@ def render(spec_path: str, output: str, workdir: str | None = None):
         if audio_path:
             art["narration_path"] = audio_path
         img_path = scene_image_clip(scene, theme, workdir) if scene.get("image") else None
+        if stype == "image":
+            # image scenes carry their picture in `src`, not an AI `image` block
+            art["image_png"] = str(Path(scene["src"]).resolve())
         if stype == "chart":
             art["chart_png"] = str(workdir / f"chart_{hashlib.sha1(json.dumps(scene).encode()).hexdigest()[:10]}.png")
         if img_path:

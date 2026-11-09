@@ -47,6 +47,13 @@
       "narration": "Monthly recurring revenue climbed from four hundred ten thousand in July to five hundred twelve thousand in September."
     },
     {
+      "type": "image",
+      "src": "samples/assets/city-skyline.png",
+      "caption": "Two new cities on the map",
+      "anim": "kenburns",
+      "narration": "We also expanded into two new cities this quarter."
+    },
+    {
       "type": "bullets",
       "heading": "Looking Ahead",
       "items": [
