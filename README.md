@@ -84,6 +84,14 @@ AA (≥ 4.5:1) is met. If the target can't be reached even at maximum scrim,
 the render continues with a warning (best-effort) — it never aborts.
 `left`/`right` placements keep text on the solid theme background (contrast
 by construction) with the image in a bordered panel.
+- **Branding** (optional): overlay a logo (PNG alpha respected; path relative
+  to the spec). `position` is any corner, `margin` in px, `max_height` a
+  fraction of frame height, `scenes` is `"all"` or a list of scene types —
+
+```json
+"branding": { "logo": "assets/logo.png", "position": "bottom-right", "margin": 48,
+              "max_height": 0.10, "opacity": 0.85, "scenes": ["title", "outro"] }
+```
 - **Timing**: omit `duration` and provide `narration` for audio-driven scenes;
   `padding` (default 1.0s) adds a guaranteed tail buffer after narration.
 - **Voice**: built-in voice slugs (list via `GET /v1/audio/voices`) or a

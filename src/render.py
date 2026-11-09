@@ -349,6 +349,44 @@ def build_outro(scene, theme):
     return CompositeVideoClip([bg, txt], size=(W, H))
 
 
+BRAND_POSITIONS = ("top-left", "top-right", "bottom-left", "bottom-right")
+
+
+def load_branding(cfg: dict | None, spec_dir: Path):
+    """Pre-load the optional `branding` logo as (clip, scenes); None if absent."""
+    if not cfg:
+        return None
+    logo = Path(cfg["logo"])
+    if not logo.is_absolute():
+        logo = spec_dir / logo
+    if not logo.is_file():
+        print(f"[warn] branding logo not found: {logo}; rendering without logo")
+        return None
+    pos = cfg.get("position", "bottom-right")
+    if pos not in BRAND_POSITIONS:
+        raise ValueError(f"branding.position must be one of {BRAND_POSITIONS}, got {pos!r}")
+    margin = max(1, int(cfg.get("margin", 48)))  # never touch the frame border
+    clip = ImageClip(str(logo))  # PNG alpha channel becomes the clip's mask
+    max_h = int(H * cfg.get("max_height", 0.10))
+    if clip.h != max_h:
+        clip = clip.resized(height=max_h)
+    clip = clip.with_opacity(cfg.get("opacity", 1.0))  # multiplies the alpha mask
+    x = margin if pos.endswith("left") else W - clip.w - margin
+    y = margin if pos.startswith("top") else H - clip.h - margin
+    return clip.with_position((x, y)), cfg.get("scenes", "all")
+
+
+def apply_branding(clip, stype: str, brand):
+    """Overlay the logo if this scene type is selected by `scenes`."""
+    if brand is None or (brand[1] != "all" and stype not in brand[1]):
+        return clip
+    # Pin the scene at "center" exactly as concatenate_videoclips(method=
+    # "compose") does, so animated positions (slide-up) are not shifted.
+    return CompositeVideoClip([clip.with_position("center"),
+                               brand[0].with_duration(clip.duration)],
+                              size=(W, H)).with_duration(clip.duration)
+
+
 BUILDERS = {
     "title": build_title,
     "bullets": build_bullets,
@@ -396,6 +434,7 @@ def render(spec_path: str, output: str, workdir: str | None = None):
     voice_cfg = spec.get("voice", {})
     workdir = Path(workdir or Path(spec_path).parent / ".render_cache")
     workdir.mkdir(parents=True, exist_ok=True)
+    brand = load_branding(spec.get("branding"), Path(spec_path).resolve().parent)
 
     video_clips, audios = [], []
     scene_artifacts = []
@@ -433,6 +472,7 @@ def render(spec_path: str, output: str, workdir: str | None = None):
         if scene.get("anim") in ("zoom-in", "kenburns"):
             clip = CompositeVideoClip([clip.with_position("center")], size=(W, H))\
                 .with_duration(dur)
+        clip = apply_branding(clip, stype, brand)
 
         if audio_path:
             audios.append(AudioFileClip(audio_path).with_start(t_cursor))
