@@ -3,13 +3,20 @@ scene's narration WAV embedded on its slide.
 
 Built from the individual artifacts (spec, narration clips, chart PNGs,
 generated scene images) — never from the rendered video.
+
+Chart scenes become native, editable PowerPoint charts; the video's chart PNG
+is only used as a fallback.
 """
 import json
 from pathlib import Path
 
 from pptx import Presentation
+from pptx.chart.data import CategoryChartData
 from pptx.dml.color import RGBColor
+from pptx.enum.chart import XL_CHART_TYPE, XL_LABEL_POSITION, XL_MARKER_STYLE
 from pptx.enum.text import PP_ALIGN
+from pptx.oxml import parse_xml
+from pptx.oxml.ns import nsdecls, qn
 from pptx.util import Emu, Inches, Pt
 
 SLIDE_W = Inches(13.333)
@@ -19,6 +26,126 @@ SLIDE_H = Inches(7.5)
 def _rgb(hex_color: str) -> RGBColor:
     h = hex_color.lstrip("#")
     return RGBColor(int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+
+
+def _blend(fg: RGBColor, bg: RGBColor, alpha: float) -> RGBColor:
+    """`fg` drawn at `alpha` opacity over `bg` (matplotlib's faint grid)."""
+    return RGBColor(*(round(f * alpha + b * (1 - alpha)) for f, b in zip(fg, bg)))
+
+
+NATIVE_CHART_TYPES = {
+    "bar": XL_CHART_TYPE.COLUMN_CLUSTERED,
+    "line": XL_CHART_TYPE.LINE_MARKERS,
+    "pie": XL_CHART_TYPE.PIE,
+}
+
+# Same frame the chart PNG occupies.
+CHART_X, CHART_Y = Inches(0.8), Inches(0.8)
+CHART_W, CHART_H = SLIDE_W - Inches(1.6), SLIDE_H - Inches(1.6)
+
+_NO_FILL_SPPR = "<c:spPr %s><a:noFill/><a:ln><a:noFill/></a:ln></c:spPr>" % nsdecls("c", "a")
+
+
+def _clear_background(chart):
+    """Transparent chart and plot areas so the slide's theme background shows
+    through, as in the video. python-pptx has no API for these."""
+    c_chart = chart._chartSpace.find(qn("c:chart"))
+    c_chart.addnext(parse_xml(_NO_FILL_SPPR))                  # spPr follows c:chart
+    c_chart.find(qn("c:plotArea")).append(parse_xml(_NO_FILL_SPPR))
+
+
+def _style_text(text_frame, text: str, size: int, color: RGBColor, bold=False):
+    text_frame.text = text
+    font = text_frame.paragraphs[0].runs[0].font
+    font.size = Pt(size)
+    font.bold = bold
+    font.color.rgb = color
+
+
+def add_native_chart(slide, scene: dict, bg: RGBColor, fg: RGBColor, accent: RGBColor):
+    """Editable chart from the scene's labels/values, themed like the
+    matplotlib chart in the video."""
+    kind = scene.get("chart_type", "bar")
+    data = CategoryChartData()
+    data.categories = scene["labels"]
+    data.add_series(scene.get("y_label") or scene.get("heading") or "Value", scene["values"])
+    frame = slide.shapes.add_chart(NATIVE_CHART_TYPES[kind], CHART_X, CHART_Y,
+                                   CHART_W, CHART_H, data)
+    chart = frame.chart
+    try:
+        _style_chart(chart, scene, kind, bg, fg, accent)
+    except Exception:
+        frame._element.getparent().remove(frame._element)  # no half-styled chart
+        raise
+    return frame
+
+
+def _style_chart(chart, scene, kind, bg, fg, accent):
+    _clear_background(chart)
+    chart.font.size = Pt(14)
+    chart.font.color.rgb = fg
+    chart.has_legend = False
+    if scene.get("heading"):
+        chart.has_title = True
+        _style_text(chart.chart_title.text_frame, scene["heading"], 24, fg, bold=True)
+    else:
+        chart.has_title = False
+
+    plot = chart.plots[0]
+    series = plot.series[0]
+    if kind == "pie":
+        # as in the video: accent/fg/grey slices, category + percent labels
+        palette = [accent, fg, RGBColor(0x88, 0x88, 0x88)]
+        for i, point in enumerate(series.points):
+            point.format.fill.solid()
+            point.format.fill.fore_color.rgb = palette[i % len(palette)]
+            point.format.line.color.rgb = bg
+        labels = series.data_labels
+        labels.font.color.rgb = fg
+        labels.show_category_name = True
+        labels.show_percentage = True
+        labels.show_value = False
+        labels.number_format = "0%"
+        labels.number_format_is_linked = False
+        labels.position = XL_LABEL_POSITION.OUTSIDE_END
+        return
+
+    plot.vary_by_categories = False
+    if kind == "bar":
+        plot.gap_width = 80
+        series.format.fill.solid()
+        series.format.fill.fore_color.rgb = accent
+    else:  # line
+        series.smooth = False
+        series.format.line.color.rgb = accent
+        series.format.line.width = Pt(3)
+        series.marker.style = XL_MARKER_STYLE.CIRCLE
+        series.marker.size = 10
+        series.marker.format.fill.solid()
+        series.marker.format.fill.fore_color.rgb = accent
+        series.marker.format.line.color.rgb = accent
+
+    for axis in (chart.category_axis, chart.value_axis):
+        axis.format.line.color.rgb = fg
+        axis.tick_labels.font.color.rgb = fg
+    chart.value_axis.has_major_gridlines = True
+    chart.value_axis.major_gridlines.format.line.color.rgb = _blend(fg, bg, 0.25)
+    if scene.get("y_label"):
+        chart.value_axis.has_title = True
+        _style_text(chart.value_axis.axis_title.text_frame, scene["y_label"], 16, fg)
+
+
+def _add_chart_scene(slide, scene: dict, art: dict, bg, fg, accent):
+    """Native chart; falls back to the video's chart PNG with a warning if
+    the native chart can't be built."""
+    try:
+        add_native_chart(slide, scene, bg, fg, accent)
+        return
+    except Exception as e:
+        print(f"[warn] native pptx chart failed ({type(e).__name__}: {e}); using chart PNG")
+    if art.get("chart_png"):
+        slide.shapes.add_picture(art["chart_png"], left=CHART_X, top=CHART_Y,
+                                 width=CHART_W, height=CHART_H)
 
 
 def build_pptx(spec: dict, scene_artifacts: list, output_path: str):
@@ -102,12 +229,7 @@ def build_pptx(spec: dict, scene_artifacts: list, output_path: str):
                     left=SLIDE_W - Inches(5.4), top=Inches(1.2),
                     width=Inches(4.8), height=Inches(4.8))
         elif stype == "chart":
-            if art.get("chart_png"):
-                slide.shapes.add_picture(
-                    art["chart_png"],
-                    left=Inches(0.8), top=Inches(0.8),
-                    width=SLIDE_W - Inches(1.6),
-                    height=SLIDE_H - Inches(1.6))
+            _add_chart_scene(slide, scene, art, bg, fg, accent)
         elif stype == "image" and art.get("image_png"):
             slide.shapes.add_picture(art["image_png"], 0, 0,
                                      width=SLIDE_W, height=SLIDE_H)
