@@ -2,6 +2,7 @@
 
 Usage:
     python3 render.py spec.json [-o output.mp4] [--workdir /tmp/renders]
+    python3 render.py spec.json -o deck.pptx --pptx-only   # PowerPoint only, no MP4
 
 Scene durations are audio-driven when `narration` is present (duration = audio
 length + padding), unless an explicit `duration` overrides them.
@@ -305,7 +306,12 @@ def build_image(scene, theme, workdir):
     return CompositeVideoClip(clips, size=(W, H))
 
 
-def build_chart(scene, theme, workdir):
+def chart_png_path(scene: dict, workdir: Path) -> Path:
+    return workdir / f"chart_{hashlib.sha1(json.dumps(scene).encode()).hexdigest()[:10]}.png"
+
+
+def render_chart_png(scene: dict, theme: dict, workdir: Path) -> Path:
+    """Draw the scene's chart with Matplotlib into the workdir (no video clips)."""
     fig, ax = plt.subplots(figsize=(19.2, 10.8), dpi=100)
     fig.patch.set_facecolor(theme["bg"])
     ax.set_facecolor(theme["bg"])
@@ -328,9 +334,14 @@ def build_chart(scene, theme, workdir):
                      fontsize=28, pad=20)
         ax.grid(axis="y", alpha=0.25, color=theme["fg"])
     fig.tight_layout(pad=3.5)
-    out = workdir / f"chart_{hashlib.sha1(json.dumps(scene).encode()).hexdigest()[:10]}.png"
+    out = chart_png_path(scene, workdir)
     fig.savefig(out, facecolor=theme["bg"])
     plt.close(fig)
+    return out
+
+
+def build_chart(scene, theme, workdir):
+    out = render_chart_png(scene, theme, workdir)
     # Fit inside the frame with a 6% margin on all sides
     margin = 0.06
     img = ImageClip(str(out))
@@ -380,6 +391,31 @@ def _ffmpeg_exe() -> str:
     return imageio_ffmpeg.get_ffmpeg_exe()
 
 
+def collect_scene_artifacts(scene: dict, theme: dict, workdir: Path,
+                            audio_path: str | None) -> dict:
+    """Per-scene inputs for pptx_export.build_pptx: narration WAV, chart PNG,
+    scene image (generated or reused from the workdir cache) and its scrim.
+
+    Needs no video clips, so the video and PPTX-only paths share it. Expects
+    the chart PNG to exist already (build_chart / render_chart_png write it).
+    """
+    art = {}
+    if audio_path:
+        art["narration_path"] = audio_path
+    img_path = scene_image_clip(scene, theme, workdir) if scene.get("image") else None
+    if scene["type"] == "chart":
+        art["chart_png"] = str(chart_png_path(scene, workdir))
+    if img_path:
+        if scene.get("image", {}).get("placement", "background") in ("left", "right"):
+            art["image_png"] = img_path
+        else:
+            art["bg_image_png"] = img_path
+            scrim, _ = imggen.scrim_for_contrast(
+                img_path, theme["fg"], theme["bg"], img_opacity=scene["image"].get("opacity", 0.25))
+            art["scrim"] = scrim
+    return art
+
+
 def _export_pptx(spec, scene_artifacts, output):
     try:
         import pptx_export
@@ -390,7 +426,14 @@ def _export_pptx(spec, scene_artifacts, output):
         print(f"[warn] pptx export failed: {e}")
 
 
-def render(spec_path: str, output: str, workdir: str | None = None):
+def render(spec_path: str, output: str, workdir: str | None = None,
+           render_video: bool = True):
+    """Render the spec to an MP4 plus a .pptx next to it.
+
+    render_video=False is PowerPoint-only mode: narration, charts and scene
+    images are still produced (or reused from the workdir cache), but no
+    video clips are built and nothing is encoded; only the .pptx is written.
+    """
     spec = load_spec(spec_path)
     theme = spec["theme"]
     voice_cfg = spec.get("voice", {})
@@ -401,18 +444,21 @@ def render(spec_path: str, output: str, workdir: str | None = None):
     scene_artifacts = []
     t_cursor = 0.0
     fps = spec["meta"]["fps"]
-    stream = len(spec["timeline"]) > 12
+    stream = render_video and len(spec["timeline"]) > 12
     seg_dir = workdir / "segments"
     if stream:
         seg_dir.mkdir(exist_ok=True)
         print(f"[stream] long timeline ({len(spec['timeline'])} scenes); rendering per-scene segments")
     for i, scene in enumerate(spec["timeline"]):
         stype = scene["type"]
-        builder = BUILDERS[stype]
-        if stype in ("image", "chart", "title", "bullets"):
-            clip = builder(scene, theme, workdir)
-        else:
-            clip = builder(scene, theme)
+        if render_video:
+            builder = BUILDERS[stype]
+            if stype in ("image", "chart", "title", "bullets"):
+                clip = builder(scene, theme, workdir)
+            else:
+                clip = builder(scene, theme)
+        elif stype == "chart":
+            render_chart_png(scene, theme, workdir)  # build_chart does this on the video path
 
         try:
             audio_path, audio_dur = synth_narration(scene, workdir, voice_cfg)
@@ -424,48 +470,40 @@ def render(spec_path: str, output: str, workdir: str | None = None):
                 raise
 
         dur = scene_duration(scene, audio_dur)
-        clip = clip.with_duration(dur)
-        clip = apply_anim(clip, scene.get("anim", "fade"), dur)
-        # Animations like zoom-in resize frames over time even though the
-        # clip's nominal size stays 1920x1080; composite onto the fixed canvas
-        # so encoding always sees constant frame dimensions (variable-size
-        # streams decode as garbage/static in players).
-        if scene.get("anim") in ("zoom-in", "kenburns"):
-            clip = CompositeVideoClip([clip.with_position("center")], size=(W, H))\
-                .with_duration(dur)
+        if render_video:
+            clip = clip.with_duration(dur)
+            clip = apply_anim(clip, scene.get("anim", "fade"), dur)
+            # Animations like zoom-in resize frames over time even though the
+            # clip's nominal size stays 1920x1080; composite onto the fixed canvas
+            # so encoding always sees constant frame dimensions (variable-size
+            # streams decode as garbage/static in players).
+            if scene.get("anim") in ("zoom-in", "kenburns"):
+                clip = CompositeVideoClip([clip.with_position("center")], size=(W, H))\
+                    .with_duration(dur)
 
-        if audio_path:
-            audios.append(AudioFileClip(audio_path).with_start(t_cursor))
+            if audio_path:
+                audios.append(AudioFileClip(audio_path).with_start(t_cursor))
 
-        # Bound memory on long timelines: render each scene straight to a
-        # disk segment and release it, instead of holding every composite.
-        if stream:
-            seg = seg_dir / f"seg_{i:03d}.mp4"
-            clip.write_videofile(str(seg), fps, codec="libx264", logger=None)
-            clip.close()
-            del clip
-        else:
-            video_clips.append(clip)
-
-        art = {}
-        if audio_path:
-            art["narration_path"] = audio_path
-        img_path = scene_image_clip(scene, theme, workdir) if scene.get("image") else None
-        if stype == "chart":
-            art["chart_png"] = str(workdir / f"chart_{hashlib.sha1(json.dumps(scene).encode()).hexdigest()[:10]}.png")
-        if img_path:
-            if scene.get("image", {}).get("placement", "background") in ("left", "right"):
-                art["image_png"] = img_path
+            # Bound memory on long timelines: render each scene straight to a
+            # disk segment and release it, instead of holding every composite.
+            if stream:
+                seg = seg_dir / f"seg_{i:03d}.mp4"
+                clip.write_videofile(str(seg), fps, codec="libx264", logger=None)
+                clip.close()
+                del clip
             else:
-                art["bg_image_png"] = img_path
-                scrim, _ = imggen.scrim_for_contrast(
-                    img_path, theme["fg"], theme["bg"], img_opacity=scene["image"].get("opacity", 0.25))
-                art["scrim"] = scrim
-        scene_artifacts.append(art)
+                video_clips.append(clip)
+
+        scene_artifacts.append(collect_scene_artifacts(scene, theme, workdir, audio_path))
 
         print(f"[scene {i}] {stype}: {dur:.2f}s starting at {t_cursor:.2f}s"
               + (f" (narration {audio_dur:.2f}s)" if audio_path else ""))
         t_cursor += dur
+
+    if not render_video:
+        print(f"[pptx-only] {t_cursor:.1f}s total slide timing; no video encoded")
+        _export_pptx(spec, scene_artifacts, output)
+        return
 
     if stream:
         # Concatenate segments with the ffmpeg concat demuxer (O(1) memory;
@@ -508,6 +546,9 @@ if __name__ == "__main__":
     p.add_argument("spec")
     p.add_argument("-o", "--output", default="output/video.mp4")
     p.add_argument("--workdir", default=None)
+    p.add_argument("--pptx-only", action="store_true",
+                   help="write only the .pptx (narration, images, charts included); "
+                        "skip video clips and MP4 encoding")
     args = p.parse_args()
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-    render(args.spec, args.output, args.workdir)
+    render(args.spec, args.output, args.workdir, render_video=not args.pptx_only)
